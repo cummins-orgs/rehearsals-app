@@ -1,6 +1,6 @@
-# 🎈 Blank app template
+# Rehearsals
 
-A simple Streamlit app template for you to modify!
+Audio meditations for kinaesthetic reps, wherever you are.
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
 
@@ -24,3 +24,4 @@ $ source venv/bin/activate
    ```
    $ streamlit run streamlit_app.py
    ```
+
