@@ -15,10 +15,51 @@ import streamlit as st
 import uuid
 from datetime import datetime
 import json
+from io import BytesIO
+from elevenlabs import VoiceSettings
+from elevenlabs.client import ElevenLabs
+import os
+from dotenv import load_dotenv
+from s3_uploader import generate_presigned_url, upload_audiostream_to_s3
 
-# Initialize session state for storing meditations if not exists
-if 'meditations' not in st.session_state:
-    st.session_state.meditations = {}
+
+
+# load env vars and set up ElevenLabs
+load_dotenv()
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+if not ELEVENLABS_API_KEY:
+    raise ValueError("ELEVENLABS_API_KEY environment variable not set")
+client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+
+# Elevenlabs voiceover stream function
+
+def text_to_speech_stream(text: str) -> BytesIO:
+    """Generate speech from text using ElevenLabs API"""
+    response = client.text_to_speech.convert(
+        voice_id="pNInz6obpgDQGcFmaJgB",  # Adam voice
+        optimize_streaming_latency="0",
+        output_format="mp3_22050_32",
+        text=text,
+        model_id="eleven_multilingual_v2",
+        voice_settings=VoiceSettings(
+            stability=0.0,
+            similarity_boost=1.0,
+            style=0.0,
+            use_speaker_boost=True,
+        ),
+    )
+    
+    audio_stream = BytesIO()
+    for chunk in response:
+        if chunk:
+            audio_stream.write(chunk)
+    audio_stream.seek(0)
+    return audio_stream
+
+
+# Initialize session state for storing rehearsals if not exists
+if 'rehearsals' not in st.session_state:
+    st.session_state.rehearsals = {}
 
 if 'current_screen' not in st.session_state:
     st.session_state.current_screen = 'create'
@@ -26,29 +67,29 @@ if 'current_screen' not in st.session_state:
 def generate_id():
     return str(uuid.uuid4())
 
-def create_meditation_screen():
-    st.title("Create Meditation")
+def create_rehearsal_screen():
+    st.title("Create rehearsal")
     
     # Navigation
     if st.button("Go to Playback", type="secondary"):
         st.session_state.current_screen = 'play'
         st.rerun()
     
-    # Form for meditation creation
-    with st.form("meditation_form"):
-        meditation_text = st.text_area(
-            "Enter your meditation ideas",
+    # Form for rehearsal creation
+    with st.form("rehearsal_form"):
+        rehearsal_text = st.text_area(
+            "Enter your rehearsal ideas",
             height=200,
-            key="meditation_input"
+            key="rehearsal_input"
         )
         
         # Track whether we're in edit mode
         is_editing = 'enhanced_text' not in st.session_state
         
         if is_editing:
-            submit_label = "Design Meditation"
+            submit_label = "Design rehearsal"
         else:
-            submit_label = "Redesign Meditation"
+            submit_label = "Redesign rehearsal"
         
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -59,86 +100,117 @@ def create_meditation_screen():
             )
         
         # Handle design submission
-        if design_submitted and meditation_text:
+        if design_submitted and rehearsal_text:
             # Simulate LLM enhancement
-            enhanced_text = f"Enhanced: {meditation_text}"
+            enhanced_text = f"Enhanced: {rehearsal_text}"
             st.session_state.enhanced_text = enhanced_text
             st.rerun()
     
     # Show enhanced text and completion button if we have processed text
     if 'enhanced_text' in st.session_state:
         st.text_area(
-            "Enhanced Meditation",
+            "Enhanced rehearsal",
             value=st.session_state.enhanced_text,
             height=200,
             key="enhanced_output"
         )
+        # Add a progress message placeholder
+        progress_placeholder = st.empty()
         
         if st.button(
             "Complete and Generate Voiceover",
             type="primary",
             use_container_width=True
         ):
-            # Create new meditation object
-            meditation_id = generate_id()
-            meditation = {
-                'id': meditation_id,
-                'title': st.session_state.enhanced_text.split()[:4],
-                'content': st.session_state.enhanced_text,
-                'created_at': datetime.now().isoformat(),
-                'audio_url': None  # Would be populated by voice generation service
-            }
-            
+            try:
+                progress_placeholder.text("Generating voiceover...")
+                
+                # Generate audio using ElevenLabs
+                audio_stream = text_to_speech_stream(st.session_state.enhanced_text)
+                
+                # Create new rehearsal object
+                rehearsal_id = generate_id()
+                try:
+                    rehearsal_s3_file_name = upload_audiostream_to_s3(audio_stream,rehearsal_id)
+                except Exception as e:
+                    progress_placeholder.error(f"Error saving voiceover to s3: {str(e)}")
+                    break
+                rehearsal = {
+                    'id': rehearsal_id,
+                    'title': st.session_state.enhanced_text.split()[:4],
+                    'content': st.session_state.enhanced_text,
+                    'created_at': datetime.now().isoformat(),
+                    'audio_data': audio_stream.getvalue()  # Store audio data in memory
+                    's3_file_name': rehearsal_s3_file_name
+                }
+
+
+            except Exception as e:
+                progress_placeholder.error(f"Error generating voiceover: {str(e)}")
+
+                        
             # Store in our dictionary
-            st.session_state.meditations[meditation_id] = meditation
+            st.session_state.rehearsals[rehearsal_id] = rehearsal
+
+
+            
             
             # Clear the session state for next creation
             del st.session_state.enhanced_text
             
+            # update progress placeholder
+
+            progress_placeholder.text("Voiceover generated successfully!")
             # Switch to play screen
             st.session_state.current_screen = 'play'
             st.rerun()
 
-def play_meditation_screen():
-    st.title("Play Meditation")
+def play_rehearsal_screen():
+    st.title("Play rehearsal")
     
     # Navigation
-    if st.button("Create New Meditation", type="secondary"):
+    if st.button("Create New Rehearsal", type="secondary"):
         st.session_state.current_screen = 'create'
         st.rerun()
     
-    if not st.session_state.meditations:
-        st.warning("No meditations created yet. Create your first meditation!")
+    if not st.session_state.rehearsals:
+        st.warning("No Rehearsals created yet. Create your first Rehearsal!")
         return
     
-    # Get list of meditations
-    meditations = list(st.session_state.meditations.values())
+    # Get list of rehearsals
+    rehearsals = list(st.session_state.rehearsals.values())
     
-    # Track current meditation index
-    if 'current_meditation_index' not in st.session_state:
-        st.session_state.current_meditation_index = 0
+    # Track current rehearsal index
+    if 'current_rehearsal_index' not in st.session_state:
+        st.session_state.current_rehearsal_index = 0
     
-    current_meditation = meditations[st.session_state.current_meditation_index]
+    current_rehearsal = rehearsals[st.session_state.current_rehearsal_index]
     
     # Create columns for navigation and player
     col1, col2, col3 = st.columns([1, 3, 1])
     
     with col1:
         if st.button("⬅️ Previous"):
-            st.session_state.current_meditation_index = (
-                st.session_state.current_meditation_index - 1
-            ) % len(meditations)
+            st.session_state.current_rehearsal_index = (
+                st.session_state.current_rehearsal_index - 1
+            ) % len(rehearsals)
+            # Reset playing state when changing rehearsal
+            st.session_state.is_playing = False
             st.rerun()
     
     with col2:
-        # Display current meditation
+        # Display current rehearsal
         st.markdown(
-            f"<h2 style='text-align: center;'>{' '.join(current_meditation['title'])}...</h2>",
+            f"<h2 style='text-align: center;'>{' '.join(current_rehearsal['title'])}...</h2>",
             unsafe_allow_html=True
         )
         
         # Center the play controls
         _, play_col, stop_col, _ = st.columns([2, 1, 1, 2])
+        
+        # Create a placeholder for the audio player and error messages
+        audio_placeholder = st.empty()
+        message_placeholder = st.empty()
         
         with play_col:
             if 'is_playing' not in st.session_state:
@@ -148,33 +220,62 @@ def play_meditation_screen():
                 "⏸️ Pause" if st.session_state.is_playing else "▶️ Play",
                 use_container_width=True
             ):
-                st.session_state.is_playing = not st.session_state.is_playing
+                # Check if audio data exists
+                if 'audio_data' in current_rehearsal:
+                    try:
+                        st.session_state.is_playing = not st.session_state.is_playing
+                        
+                        if st.session_state.is_playing:
+                            # Clear any previous error messages
+                            message_placeholder.empty()
+                            # Display audio player
+                            audio_placeholder.audio(
+                                current_rehearsal['audio_data'],
+                                format='audio/mp3',
+                                start_time=0
+                            )
+                        else:
+                            # Clear audio player when paused
+                            audio_placeholder.empty()
+                            
+                    except Exception as e:
+                        st.session_state.is_playing = False
+                        message_placeholder.error(f"Error playing rehearsal: {str(e)}")
+                        audio_placeholder.empty()
+                else:
+                    message_placeholder.warning("No audio available for this rehearsal")
+                    st.session_state.is_playing = False
         
         with stop_col:
             if st.button("⏹️ Stop", use_container_width=True):
                 st.session_state.is_playing = False
+                audio_placeholder.empty()
+                message_placeholder.empty()
     
     with col3:
         if st.button("Next ➡️"):
-            st.session_state.current_meditation_index = (
-                st.session_state.current_meditation_index + 1
-            ) % len(meditations)
+            st.session_state.current_rehearsal_index = (
+                st.session_state.current_rehearsal_index + 1
+            ) % len(rehearsals)
+            # Reset playing state when changing rehearsal
+            st.session_state.is_playing = False
             st.rerun()
     
-    # Display meditation content
+    # Display rehearsal content
     st.markdown("### Transcript")
-    st.write(current_meditation['content'])
+    st.write(current_rehearsal['content'])
+
 
 # Main app logic
 def main():
     if st.session_state.current_screen == 'create':
-        create_meditation_screen()
+        create_rehearsal_screen()
     else:
-        play_meditation_screen()
+        play_rehearsal_screen()
 
 if __name__ == "__main__":
     st.set_page_config(
-        page_title="Meditation App",
+        page_title="Rehearsals.app",
         page_icon="🧘‍♀️",
         layout="wide"
     )
