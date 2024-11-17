@@ -1,16 +1,3 @@
-"""import streamlit as st
-
-st.title("Rehearsals")
-st.write(
-    "Let's start building! For help and inspiration, head over to [docs.streamlit.io](https://docs.streamlit.io/)."
-)
-
-testy = st.chat_input(placeholder="Your message", key=None, max_chars=None, disabled=False, on_submit=None, args=None, kwargs=None)
-
-st.write("testy lives here")
-if testy != None:
-    testy """
-
 import streamlit as st
 import uuid
 from datetime import datetime
@@ -20,9 +7,7 @@ from elevenlabs import VoiceSettings
 from elevenlabs.client import ElevenLabs
 import os
 from dotenv import load_dotenv
-from s3_uploader import generate_presigned_url, upload_audiostream_to_s3
-
-
+from spotify_handler import SpotifyPodcastHandler
 
 # load env vars and set up ElevenLabs
 load_dotenv()
@@ -31,7 +16,13 @@ if not ELEVENLABS_API_KEY:
     raise ValueError("ELEVENLABS_API_KEY environment variable not set")
 client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
-# Elevenlabs voiceover stream function
+# Initialize Spotify Handler
+if 'spotify_handler' not in st.session_state:
+    try:
+        st.session_state.spotify_handler = SpotifyPodcastHandler()
+    except Exception as e:
+        print(f"Error initializing Spotify handler: {str(e)}")
+        st.session_state.spotify_handler = None
 
 def text_to_speech_stream(text: str) -> BytesIO:
     """Generate speech from text using ElevenLabs API"""
@@ -56,7 +47,6 @@ def text_to_speech_stream(text: str) -> BytesIO:
     audio_stream.seek(0)
     return audio_stream
 
-
 # Initialize session state for storing rehearsals if not exists
 if 'rehearsals' not in st.session_state:
     st.session_state.rehearsals = {}
@@ -78,7 +68,7 @@ def create_rehearsal_screen():
     # Form for rehearsal creation
     with st.form("rehearsal_form"):
         rehearsal_text = st.text_area(
-            "Enter your rehearsal ideas",
+            "Enter your rehearsal prompt",
             height=200,
             key="rehearsal_input"
         )
@@ -91,8 +81,8 @@ def create_rehearsal_screen():
         else:
             submit_label = "Redesign rehearsal"
         
-        col1, col2 = st.columns([3, 1])
-        with col1:
+        col1, col2, col3 = st.columns([1, 2, 1])  # Creates three columns with middle one being larger
+        with col2:  # Use the middle column
             design_submitted = st.form_submit_button(
                 submit_label,
                 type="primary",
@@ -130,40 +120,46 @@ def create_rehearsal_screen():
                 
                 # Create new rehearsal object
                 rehearsal_id = generate_id()
-                try:
-                    rehearsal_s3_file_name = upload_audiostream_to_s3(audio_stream,rehearsal_id)
-                except Exception as e:
-                    progress_placeholder.error(f"Error saving voiceover to s3: {str(e)}")
-                    break
+                
+                # Initialize rehearsal object
                 rehearsal = {
                     'id': rehearsal_id,
                     'title': st.session_state.enhanced_text.split()[:4],
                     'content': st.session_state.enhanced_text,
                     'created_at': datetime.now().isoformat(),
-                    'audio_data': audio_stream.getvalue()  # Store audio data in memory
-                    's3_file_name': rehearsal_s3_file_name
+                    'audio_data': audio_stream.getvalue()
                 }
 
+                # Handle Spotify upload if available
+                if st.session_state.spotify_handler:
+                    try:
+                        progress_placeholder.text("Uploading to Spotify...")
+                        episode_id = st.session_state.spotify_handler.upload_episode(
+                            audio_data=audio_stream.getvalue(),
+                            title=" ".join(st.session_state.enhanced_text.split()[:4]),
+                            description=st.session_state.enhanced_text
+                        )
+                        if episode_id:
+                            episode_url = st.session_state.spotify_handler.get_episode_url(episode_id)
+                            rehearsal['spotify_episode_id'] = episode_id
+                            rehearsal['spotify_url'] = episode_url
+                            progress_placeholder.success(f"Successfully uploaded to Spotify! Listen here: {episode_url}")
+                    except Exception as e:
+                        progress_placeholder.error(f"Error uploading to Spotify: {str(e)}")
+                
+                # Store the rehearsal in session state
+                st.session_state.rehearsals[rehearsal_id] = rehearsal
+                
+                # Clear the session state for next creation
+                del st.session_state.enhanced_text
+                
+                # Update progress and switch screens
+                progress_placeholder.text("Rehearsal created successfully!")
+                st.session_state.current_screen = 'play'
+                st.rerun()
 
             except Exception as e:
-                progress_placeholder.error(f"Error generating voiceover: {str(e)}")
-
-                        
-            # Store in our dictionary
-            st.session_state.rehearsals[rehearsal_id] = rehearsal
-
-
-            
-            
-            # Clear the session state for next creation
-            del st.session_state.enhanced_text
-            
-            # update progress placeholder
-
-            progress_placeholder.text("Voiceover generated successfully!")
-            # Switch to play screen
-            st.session_state.current_screen = 'play'
-            st.rerun()
+                progress_placeholder.error(f"Error creating rehearsal: {str(e)}")
 
 def play_rehearsal_screen():
     st.title("Play rehearsal")
@@ -265,6 +261,9 @@ def play_rehearsal_screen():
     st.markdown("### Transcript")
     st.write(current_rehearsal['content'])
 
+    # Display Spotify link if available
+    if 'spotify_url' in current_rehearsal:
+        st.markdown(f"[Listen on Spotify]({current_rehearsal['spotify_url']})")
 
 # Main app logic
 def main():
